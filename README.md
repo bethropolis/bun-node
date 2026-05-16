@@ -183,12 +183,20 @@ Re-runs the installer in place. Existing shims are updated, bun is untouched.
 - **Not a full Node.js runtime.** Bun is highly compatible but not 100%
   identical. Native addons (`.node` files), some obscure `vm` / `cluster`
   APIs, and a handful of edge-case behaviours differ.
-- **`npm publish` and registry operations** fall back to real `npm`. Install
-  npm separately if you need those.
+- **`npm publish`, `npm pack`, `npm audit`** now map to their bun equivalents.
+  Registry auth (`npm login`, `npm adduser`) still falls back to real npm.
 - **`node -p` / `--print`** is translated to `bun -e "console.log(...)"` —
   works for simple expressions; complex multi-statement `-p` may not.
 - **Yarn Plug'n'Play (PnP)** is not supported by bun; classic node_modules
   mode works fine.
+
+## Why do this?
+
+- **Security** — no `preinstall` / `postinstall` scripts. Bun doesn't run them,
+  so you're not executing arbitrary code from every dependency you pull.
+- **Speed** — bun is supa fast. Installs, runs, resolves — all of it.
+- **Preference** — I use and prefer bun a lot. This lets me stop worrying
+  about whether a tool or CI script calls `node`, `npm`, `npx`, or `yarn`.
 
 ## License
 
