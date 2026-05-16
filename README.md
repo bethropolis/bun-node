@@ -95,11 +95,11 @@ manipulation at runtime, no risk of infinite recursion.
 | `npm update`                    | `bun update`                    |
 | `npm exec` / `npm x`            | `bun x`                         |
 | `npm init`                      | `bun init`                      |
-| `npm publish`                 | `bun publish`                   |
-| `npm pack`                    | `bun pm pack`                   |
-| `npm audit`                   | `bun audit`                     |
-| `npm whoami`                  | `bun pm whoami`                 |
-| `npm deprecate` etc.          | → real npm (fallback)           |
+| `npm publish`                  | `bun publish`                  |
+| `npm pack`                     | `bun pm pack`                  |
+| `npm audit`                    | `bun audit`                    |
+| `npm whoami`                   | `bun pm whoami`                |
+| `npm deprecate` etc.           | → real npm (fallback)          |
 
 Commands bun doesn't support (`npm deprecate`, `npm login`, `npm owner`, …) fall
 back to the real `npm` if one exists on your system, or error helpfully if not.
@@ -183,8 +183,8 @@ Re-runs the installer in place. Existing shims are updated, bun is untouched.
 - **Not a full Node.js runtime.** Bun is highly compatible but not 100%
   identical. Native addons (`.node` files), some obscure `vm` / `cluster`
   APIs, and a handful of edge-case behaviours differ.
-- **`npm publish`, `npm pack`, `npm audit`** now map to their bun equivalents.
-  Registry auth (`npm login`, `npm adduser`) still falls back to real npm.
+- **Registry auth** (`npm login`, `npm adduser`) still falls back to real npm.
+  Install it separately if you need those.
 - **`node -p` / `--print`** is translated to `bun -e "console.log(...)"` —
   works for simple expressions; complex multi-statement `-p` may not.
 - **Yarn Plug'n'Play (PnP)** is not supported by bun; classic node_modules
