@@ -272,6 +272,16 @@ case "\${1-}" in
     fi
     ;;
 
+  # ── Prefix ──────────────────────────────────────────────────────
+  prefix)
+    shift
+    if [ "\$1" = "-g" ] || [ "\$#" -eq 0 ]; then
+      dirname "\$(bun pm bin -g 2>/dev/null)"
+    else
+      exec "\$_bun" pm bin "\$@"
+    fi
+    ;;
+
   # ── Passthrough ─────────────────────────────────────────────────────────
   *)
     exec "\$_bun" "\$@"
