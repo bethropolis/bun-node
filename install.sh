@@ -275,10 +275,18 @@ case "\${1-}" in
   # ── Prefix ──────────────────────────────────────────────────────
   prefix)
     shift
-    if [ "\$1" = "-g" ] || [ "\$#" -eq 0 ]; then
+    if [ "\${1-}" = "-g" ] || [ "\${1-}" = "--global" ]; then
       dirname "\$(bun pm bin -g 2>/dev/null)"
     else
-      exec "\$_bun" pm bin "\$@"
+      dir="\$PWD"
+      while [ "\$dir" != "/" ]; do
+        if [ -f "\$dir/package.json" ] || [ -d "\$dir/node_modules" ]; then
+          echo "\$dir"
+          break
+        fi
+        dir="\$(dirname "\$dir")"
+      done
+      [ "\$dir" = "/" ] && echo "\$PWD"
     fi
     ;;
 
