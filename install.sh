@@ -1,536 +1,535 @@
 #!/usr/bin/env bash
-# bun-node — transparent node/npm/npx/yarn → bun shims
-# Installs into bun's own bin dir — no PATH changes needed.
-#
+# bun-node — node/npm/npx/yarn compatibility shims backed by Bun.
 # Install:   curl -fsSL https://raw.githubusercontent.com/bethropolis/bun-node/main/install.sh | bash
 # Uninstall: bun-node-uninstall
 # Update:    bun-node-update
 
-set -euo pipefail
+set -Eeuo pipefail
 
-# ── Config ───────────────────────────────────────────────────────────────────
-SPOOF_NODE_VERSION="v22.14.0"
-SPOOF_NPM_VERSION="10.9.2"
-SPOOF_YARN_VERSION="1.22.22"
+readonly VERSION='2.0.0'
+readonly MIN_BUN_MAJOR=1 MIN_BUN_MINOR=4 MIN_BUN_PATCH=2
+readonly SPOOF_NODE_VERSION='v24.5.0'
+readonly SPOOF_NPM_VERSION='12.2.0'
+readonly SPOOF_YARN_VERSION='1.22.22'
+readonly REPO='https://github.com/bethropolis/bun-node'
+readonly RAW_INSTALL='https://raw.githubusercontent.com/bethropolis/bun-node/main/install.sh'
 
-# ── Colours ──────────────────────────────────────────────────────────────────
-if [ -t 1 ]; then
-  BOLD='\033[1m'; DIM='\033[2m'; RED='\033[0;31m'
-  GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RESET='\033[0m'
-else
-  BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; CYAN=''; RESET=''
-fi
+FORCE=0
+QUIET=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    --quiet|-q) QUIET=1 ;;
+    --help|-h)
+      cat <<'HELP'
+bun-node installer
 
-step()  { printf "${CYAN}  →${RESET}  %s\n" "$*"; }
-ok()    { printf "${GREEN}  ✓${RESET}  %s\n" "$*"; }
-warn()  { printf "${YELLOW}  !${RESET}  %s\n" "$*" >&2; }
-fatal() { printf "${RED}  ✗${RESET}  %s\n" "$*" >&2; exit 1; }
+Usage: install.sh [--force] [--quiet]
 
-# ── Preflight ────────────────────────────────────────────────────────────────
-echo ""
-printf "${BOLD}bun-node installer${RESET}${DIM}  node/npm/npx/yarn → bun${RESET}\n"
-echo "──────────────────────────────────────────"
-echo ""
+  --force   Back up and replace conflicting files in Bun's bin directory.
+  --quiet   Suppress progress messages (errors are still shown).
+  --help    Show this help.
 
-command -v bun &>/dev/null \
-  || fatal "bun is not installed. Get it at https://bun.sh"
-
-BUN_BIN_PATH="$(command -v bun)"
-BUN_VERSION="$(bun --version 2>/dev/null)"
-ok "Found bun ${BUN_VERSION} at ${BUN_BIN_PATH}"
-
-# Derive BIN_DIR from where bun actually lives — not a hardcoded default.
-# This handles non-standard installs (Homebrew, Nix, custom prefix, etc.)
-BIN_DIR="$(dirname "$BUN_BIN_PATH")"
-ok "Install target: ${BIN_DIR}"
-
-# Warn if the derived dir isn't in PATH (shouldn't happen, but be safe).
-if ! echo "$PATH" | tr ':' '\n' | grep -qxF "$BIN_DIR"; then
-  warn "$BIN_DIR is not in your PATH — shims will be written but may not be active."
-fi
-
-# Detect existing shims and offer to update rather than blindly overwrite.
-EXISTING=()
-for shim in node npm npx yarn; do
-  [ -f "$BIN_DIR/$shim" ] && EXISTING+=("$shim")
+Existing non-bun-node files are never replaced without --force.
+HELP
+      exit 0
+      ;;
+    *) printf 'bun-node: unknown option: %s\n' "$arg" >&2; exit 2 ;;
+  esac
 done
 
-if [ "${#EXISTING[@]}" -gt 0 ]; then
-  printf "${YELLOW}  !${RESET}  Existing shims found: %s\n" "${EXISTING[*]}" >&2
-  printf "     Re-running will update them in place. Continue? [Y/n] "
-  read -r reply </dev/tty
-  case "${reply:-Y}" in
-    [Yy]*|"") : ;;
-    *) echo "Aborted."; exit 0 ;;
-  esac
-fi
-
-# ── Shared helpers written into each shim ────────────────────────────────────
-# BIN_DIR is baked in at install time so shims can exclude themselves from PATH
-# without hardcoding a path that might differ from where bun actually lives.
-SHIM_BIN_DIR="$BIN_DIR"
-
-# ── Write shim: node ─────────────────────────────────────────────────────────
-step "Writing node shim"
-cat > "$BIN_DIR/node" << SHIM
-#!/usr/bin/env bash
-# bun-node shim: node → bun
-# https://github.com/bethropolis/bun-node
-
-[ "\${BUN_NODE_DEBUG:-}" = "1" ] && echo "[bun-node] node \$*" >&2
-
-# Absolute path to bun, baked in at install time.
-_bun="${BUN_BIN_PATH}"
-[ -x "\$_bun" ] || { echo "bun-node: bun not found at \$_bun" >&2; exit 127; }
-
-# Read .node-version or .nvmrc from cwd upward for per-project version spoofing.
-_spoof_version() {
-  local dir="\$PWD"
-  while [ "\$dir" != "/" ]; do
-    if [ -f "\$dir/.node-version" ]; then
-      cat "\$dir/.node-version"; return
-    elif [ -f "\$dir/.nvmrc" ]; then
-      cat "\$dir/.nvmrc"; return
-    fi
-    dir="\$(dirname "\$dir")"
-  done
-  echo "\${BUN_NODE_SPOOF_VERSION:-${SPOOF_NODE_VERSION}}"
-}
-
-case "\${1-}" in
-  --version|-v)
-    ver="\$(_spoof_version)"
-    # Normalise: ensure it starts with v
-    [[ "\$ver" == v* ]] || ver="v\$ver"
-    echo "\$ver"
-    ;;
-  --print|-p)
-    shift
-    exec "\$_bun" -e "console.log(\$1)"
-    ;;
-  -e|--eval)
-    shift
-    exec "\$_bun" -e "\$@"
-    ;;
-  *)
-    exec "\$_bun" "\$@"
-    ;;
-esac
-SHIM
-
-# ── Write shim: npm ──────────────────────────────────────────────────────────
-step "Writing npm shim"
-cat > "$BIN_DIR/npm" << SHIM
-#!/usr/bin/env bash
-# bun-node shim: npm → bun
-# https://github.com/bethropolis/bun-node
-
-[ "\${BUN_NODE_DEBUG:-}" = "1" ] && echo "[bun-node] npm \$*" >&2
-
-_bun="${BUN_BIN_PATH}"
-[ -x "\$_bun" ] || { echo "bun-node: bun not found at \$_bun" >&2; exit 127; }
-
-# Find the real npm by excluding our shim dir from PATH.
-_real_npm() {
-  PATH="\$(echo "\$PATH" | tr ':' '\n' | grep -vxF "${SHIM_BIN_DIR}" | tr '\n' ':')" command -v npm 2>/dev/null
-}
-
-# Translate npm install flags → bun add flags.
-# Handles: --save-dev/-D, --save-optional/-O, --save-exact/-E, --global/-g
-_translate_install_flags() {
-  local args=() pkg_args=()
-  local is_global=0
-  while [ "\$#" -gt 0 ]; do
-    case "\$1" in
-      --save-dev|-D)         pkg_args+=("-d") ;;
-      --save-optional|-O)    pkg_args+=("--optional") ;;
-      --save-exact|-E)       pkg_args+=("--exact") ;;
-      --global|-g)           is_global=1 ;;
-      --save|-S)             : ;; # default in bun, no-op
-      --no-save)             pkg_args+=("--no-save") ;;
-      *)                     args+=("\$1") ;;
-    esac
-    shift
-  done
-  if [ "\$is_global" = "1" ]; then
-    echo "g \${pkg_args[*]-} \${args[*]-}"
-  else
-    echo " \${pkg_args[*]-} \${args[*]-}"
-  fi
-}
-
-case "\${1-}" in
-  # ── Version / meta ──────────────────────────────────────────────────────
-  --version|-v)
-    echo "\${BUN_NODE_SPOOF_NPM_VERSION:-${SPOOF_NPM_VERSION}}"
-    ;;
-
-  # ── Install ─────────────────────────────────────────────────────────────
-  install|i)
-    shift
-    if [ "\$#" -eq 0 ]; then
-      exec "\$_bun" install
-    else
-      translated="\$(_translate_install_flags "\$@")"
-      is_global="\${translated%% *}"
-      rest="\${translated#* }"
-      if [ "\$is_global" = "g" ]; then
-        # shellcheck disable=SC2086
-        exec "\$_bun" add --global \$rest
-      else
-        # shellcheck disable=SC2086
-        exec "\$_bun" add \$rest
-      fi
-    fi
-    ;;
-
-  # ── ci (frozen install — critical for CI pipelines) ─────────────────────
-  ci)
-    exec "\$_bun" install --frozen-lockfile
-    ;;
-
-  # ── Remove ──────────────────────────────────────────────────────────────
-  uninstall|remove|rm|un|r)
-    shift; exec "\$_bun" remove "\$@"
-    ;;
-
-  # ── List ────────────────────────────────────────────────────────────────
-  ls|list|ll|la)
-    shift; exec "\$_bun" pm ls "\$@"
-    ;;
-
-  # ── Link ────────────────────────────────────────────────────────────────
-  link)
-    shift; exec "\$_bun" link "\$@"
-    ;;
-  unlink)
-    shift; exec "\$_bun" unlink "\$@"
-    ;;
-
-  # ── Scripts ─────────────────────────────────────────────────────────────
-  run|run-script)
-    shift; exec "\$_bun" run "\$@"
-    ;;
-  start)
-    exec "\$_bun" run start
-    ;;
-  test|t)
-    shift; exec "\$_bun" test "\$@"
-    ;;
-
-  # ── Update ──────────────────────────────────────────────────────────────
-  update|up|upgrade)
-    shift; exec "\$_bun" update "\$@"
-    ;;
-
-  # ── Exec / dlx ──────────────────────────────────────────────────────────
-  exec|x)
-    shift; exec "\$_bun" x "\$@"
-    ;;
-
-  # ── Init ────────────────────────────────────────────────────────────────
-  init)
-    shift; exec "\$_bun" init "\$@"
-    ;;
-
-  # ── node-gyp: native addons can't run under bun — fail clearly ──────────
-  # (npm install of a gyp package triggers this internally)
-  node-gyp)
-    echo "bun-node: native addons (.node files / node-gyp) are not supported by bun." >&2
-    echo "bun-node: You'll need Node.js for this package." >&2
-    exit 1
-    ;;
-
-  # ── Publish / Pack ──────────────────────────────────────────────────────
-  publish)
-    shift; exec "\$_bun" publish "\$@"
-    ;;
-  pack)
-    shift; exec "\$_bun" pm pack "\$@"
-    ;;
-
-  # ── Audit ───────────────────────────────────────────────────────────────
-  audit)
-    exec "\$_bun" audit
-    ;;
-
-  # ── Whoami ──────────────────────────────────────────────────────────────
-  whoami)
-    exec "\$_bun" pm whoami
-    ;;
-
-  # ── Commands bun doesn't support — fall back to real npm ────────────────
-  deprecate|owner|team|org|hook|fund|token|profile|stars|adduser|login|logout|ping|access|dist-tag|shrinkwrap|doctor)
-    _npm="\$(_real_npm)"
-    if [ -n "\$_npm" ]; then
-      echo "bun-node: '\$1' is unsupported by bun — delegating to real npm at \$_npm" >&2
-      exec "\$_npm" "\$@"
-    else
-      echo "bun-node: 'npm \$1' is not supported by bun and no real npm was found." >&2
-      echo "bun-node: Install npm (https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) to use this command." >&2
-      exit 1
-    fi
-    ;;
-
-  # ── Prefix ──────────────────────────────────────────────────────
-  prefix)
-    shift
-    if [ "\${1-}" = "-g" ] || [ "\${1-}" = "--global" ]; then
-      dirname "\$(bun pm bin -g 2>/dev/null)"
-    else
-      dir="\$PWD"
-      while [ "\$dir" != "/" ]; do
-        if [ -f "\$dir/package.json" ] || [ -d "\$dir/node_modules" ]; then
-          echo "\$dir"
-          break
-        fi
-        dir="\$(dirname "\$dir")"
-      done
-      [ "\$dir" = "/" ] && echo "\$PWD"
-    fi
-    ;;
-
-  # ── Passthrough ─────────────────────────────────────────────────────────
-  *)
-    exec "\$_bun" "\$@"
-    ;;
-esac
-SHIM
-
-# ── Write shim: npx ──────────────────────────────────────────────────────────
-step "Writing npx shim"
-cat > "$BIN_DIR/npx" << SHIM
-#!/usr/bin/env bash
-# bun-node shim: npx → bun x
-# https://github.com/bethropolis/bun-node
-
-[ "\${BUN_NODE_DEBUG:-}" = "1" ] && echo "[bun-node] npx \$*" >&2
-
-_bun="${BUN_BIN_PATH}"
-[ -x "\$_bun" ] || { echo "bun-node: bun not found at \$_bun" >&2; exit 127; }
-
-case "\${1-}" in
-  --version|-v)
-    echo "\${BUN_NODE_SPOOF_NPM_VERSION:-${SPOOF_NPM_VERSION}}"
-    ;;
-  # bunx never needs -y / --yes — strip silently.
-  -y|--yes)
-    shift; exec "\$_bun" x "\$@"
-    ;;
-  # --no-install: honour intent with --prefer-offline.
-  --no-install)
-    shift; exec "\$_bun" x --prefer-offline "\$@"
-    ;;
-  # node-gyp: fail clearly rather than letting bun give a confusing error.
-  node-gyp)
-    echo "bun-node: native addons (.node files / node-gyp) are not supported by bun." >&2
-    echo "bun-node: You'll need Node.js for this package." >&2
-    exit 1
-    ;;
-  *)
-    exec "\$_bun" x "\$@"
-    ;;
-esac
-SHIM
-
-# ── Write shim: yarn ─────────────────────────────────────────────────────────
-step "Writing yarn shim"
-cat > "$BIN_DIR/yarn" << SHIM
-#!/usr/bin/env bash
-# bun-node shim: yarn → bun
-# https://github.com/bethropolis/bun-node
-
-[ "\${BUN_NODE_DEBUG:-}" = "1" ] && echo "[bun-node] yarn \$*" >&2
-
-_bun="${BUN_BIN_PATH}"
-[ -x "\$_bun" ] || { echo "bun-node: bun not found at \$_bun" >&2; exit 127; }
-
-_real_yarn() {
-  PATH="\$(echo "\$PATH" | tr ':' '\n' | grep -vxF "${SHIM_BIN_DIR}" | tr '\n' ':')" command -v yarn 2>/dev/null
-}
-
-case "\${1-}" in
-  --version|-v)
-    echo "\${BUN_NODE_SPOOF_YARN_VERSION:-${SPOOF_YARN_VERSION}}"
-    ;;
-  # bare "yarn" with no args = install
-  "")
-    exec "\$_bun" install
-    ;;
-  add)
-    shift; exec "\$_bun" add "\$@"
-    ;;
-  remove|rm)
-    shift; exec "\$_bun" remove "\$@"
-    ;;
-  install)
-    shift; exec "\$_bun" install "\$@"
-    ;;
-  run)
-    shift; exec "\$_bun" run "\$@"
-    ;;
-  # bare "yarn <script>" — yarn allows calling scripts without "run"
-  # Try bun run; if the script doesn't exist bun will error naturally.
-  start|build|test|dev|lint|format|clean|typecheck|check)
-    exec "\$_bun" run "\$@"
-    ;;
-  upgrade|up)
-    shift; exec "\$_bun" update "\$@"
-    ;;
-  global)
-    # "yarn global add <pkg>" → "bun add --global <pkg>"
-    sub="\${2-}"
-    shift 2 || shift
-    case "\$sub" in
-      add)    exec "\$_bun" add --global "\$@" ;;
-      remove) exec "\$_bun" remove --global "\$@" ;;
-      *)      exec "\$_bun" "\$sub" "\$@" ;;
-    esac
-    ;;
-  dlx)
-    shift; exec "\$_bun" x "\$@"
-    ;;
-  exec)
-    shift; exec "\$_bun" x "\$@"
-    ;;
-  init)
-    shift; exec "\$_bun" init "\$@"
-    ;;
-  link)
-    shift; exec "\$_bun" link "\$@"
-    ;;
-  unlink)
-    shift; exec "\$_bun" unlink "\$@"
-    ;;
-  info)
-    shift; exec "\$_bun" pm "\$@"
-    ;;
-  # Commands with no bun equivalent — fall back to real yarn if present.
-  publish|pack|login|logout|owner|team|workspace|workspaces|policies|why|outdated|licenses|audit|import|create)
-    _yarn="\$(_real_yarn)"
-    if [ -n "\$_yarn" ]; then
-      echo "bun-node: '\$1' unsupported by bun — delegating to real yarn at \$_yarn" >&2
-      exec "\$_yarn" "\$@"
-    else
-      echo "bun-node: 'yarn \$1' is not supported by bun and no real yarn was found." >&2
-      exit 1
-    fi
-    ;;
-  # Unknown: pass straight through and let bun decide.
-  *)
-    exec "\$_bun" run "\$@"
-    ;;
-esac
-SHIM
-
-chmod +x "$BIN_DIR/node" "$BIN_DIR/npm" "$BIN_DIR/npx" "$BIN_DIR/yarn"
-ok "Shims written and made executable"
-
-# ── Write: bun-node status ───────────────────────────────────────────────────
-step "Writing bun-node status"
-cat > "$BIN_DIR/bun-node" << SHIM
-#!/usr/bin/env bash
-# bun-node — meta command for status, update, and help
-# https://github.com/bethropolis/bun-node
-
-BIN_DIR="${SHIM_BIN_DIR}"
-
-if [ -t 1 ]; then
-  BOLD='\033[1m'; DIM='\033[2m'; GREEN='\033[0;32m'
-  YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RED='\033[0;31m'; RESET='\033[0m'
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[0;31m'
+  GREEN=$'\033[0;32m' YELLOW=$'\033[1;33m' CYAN=$'\033[0;36m' RESET=$'\033[0m'
 else
-  BOLD=''; DIM=''; GREEN=''; YELLOW=''; CYAN=''; RED=''; RESET=''
+  BOLD='' DIM='' RED='' GREEN='' YELLOW='' CYAN='' RESET=''
 fi
 
-_shim_ok() {
-  [ -f "\$BIN_DIR/\$1" ] && echo "${GREEN}✓${RESET}" || echo "${RED}✗${RESET}"
+say()  { (( QUIET )) || printf '%b  →%b  %s\n' "$CYAN" "$RESET" "$*"; }
+ok()   { (( QUIET )) || printf '%b  ✓%b  %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%b  !%b  %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+die()  { printf '%b  ✗%b  %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+
+command -v bun >/dev/null 2>&1 || die 'Bun is not installed. See https://bun.com.'
+BUN_BIN_PATH="$(type -P bun || true)"
+[[ -n "$BUN_BIN_PATH" && -x "$BUN_BIN_PATH" ]] || die 'Could not locate the Bun executable in PATH.'
+[[ "$BUN_BIN_PATH" == /* ]] || BUN_BIN_PATH="$PWD/$BUN_BIN_PATH"
+BUN_VERSION="$("$BUN_BIN_PATH" --version 2>/dev/null)" || die 'Could not run bun --version.'
+
+if [[ "$BUN_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+  major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+  if (( major < MIN_BUN_MAJOR || (major == MIN_BUN_MAJOR && minor < MIN_BUN_MINOR) || (major == MIN_BUN_MAJOR && minor == MIN_BUN_MINOR && patch < MIN_BUN_PATCH) )); then
+    die "Bun $MIN_BUN_MAJOR.$MIN_BUN_MINOR.$MIN_BUN_PATCH or newer is required; found $BUN_VERSION."
+  fi
+else
+  die "Could not parse Bun version: $BUN_VERSION"
+fi
+
+BIN_DIR="$(dirname -- "$BUN_BIN_PATH")"
+[[ -d "$BIN_DIR" && -w "$BIN_DIR" ]] || die "Bun's bin directory is not writable: $BIN_DIR"
+
+if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+  warn "$BIN_DIR is not in PATH; installed shims may not be active."
+fi
+
+if (( ! QUIET )); then
+  printf '\n%b bun-node installer %b %s\n' "$BOLD" "$RESET" "$VERSION"
+  printf '%bBun%b       %s (%s)\n' "$DIM" "$RESET" "$BUN_VERSION" "$BUN_BIN_PATH"
+  printf '%bInstall to%b %s\n\n' "$DIM" "$RESET" "$BIN_DIR"
+fi
+
+# Managed executables include a marker so an unrelated file with the same name
+# is not mistaken for a previous bun-node installation.
+is_managed() {
+  local name=$1 file="$BIN_DIR/$1"
+  case "$name" in
+    node|npm|npx|yarn)
+      [[ -L "$file" && "$(readlink -- "$file" 2>/dev/null || true)" == 'bun-node-shim' ]]
+      ;;
+    *)
+      [[ -f "$file" ]] && grep -qF 'bun-node-managed-file' "$file" 2>/dev/null
+      ;;
+  esac
 }
 
-case "\${1-status}" in
-  status)
-    echo ""
-    printf "\${BOLD}bun-node\${RESET}\${DIM}  node/npm/npx/yarn → bun\${RESET}\n"
-    echo "──────────────────────────────────────────"
-    echo ""
-    printf "  \${DIM}bun\${RESET}       \$(command -v bun 2>/dev/null || echo 'not found')  v\$(bun --version 2>/dev/null || echo '?')\n"
-    printf "  \${DIM}shim dir\${RESET}  \$BIN_DIR\n"
-    echo ""
-    printf "  \$(_shim_ok node)  node   "
-    [ -f "\$BIN_DIR/node" ] \
-      && printf "\${DIM}→ bun\${RESET}  (spoof: \$(BUN_NODE_SPOOF_VERSION='' node --version 2>/dev/null || echo '?'))\n" \
-      || printf "\${RED}not installed\${RESET}\n"
-    printf "  \$(_shim_ok npm)  npm    "
-    [ -f "\$BIN_DIR/npm" ] \
-      && printf "\${DIM}→ bun\${RESET}  (spoof: \$(BUN_NODE_SPOOF_NPM_VERSION='' npm --version 2>/dev/null || echo '?'))\n" \
-      || printf "\${RED}not installed\${RESET}\n"
-    printf "  \$(_shim_ok npx)  npx    "
-    [ -f "\$BIN_DIR/npx" ] \
-      && printf "\${DIM}→ bunx\${RESET}\n" \
-      || printf "\${RED}not installed\${RESET}\n"
-    printf "  \$(_shim_ok yarn)  yarn   "
-    [ -f "\$BIN_DIR/yarn" ] \
-      && printf "\${DIM}→ bun\${RESET}  (spoof: \$(BUN_NODE_SPOOF_YARN_VERSION='' yarn --version 2>/dev/null || echo '?'))\n" \
-      || printf "\${RED}not installed\${RESET}\n"
-    echo ""
-    printf "  \${DIM}debug\${RESET}     export BUN_NODE_DEBUG=1  (logs every translation)\n"
-    echo ""
+DESTINATIONS=(bun-node-shim node npm npx yarn bun-node-prefix bun-node bun-node-uninstall bun-node-update)
+CONFLICTS=()
+for name in "${DESTINATIONS[@]}"; do
+  file="$BIN_DIR/$name"
+  if [[ -e "$file" || -L "$file" ]] && ! is_managed "$name"; then
+    CONFLICTS+=("$name")
+  fi
+done
+
+if ((${#CONFLICTS[@]})); then
+  printf '%b  !%b  Conflicting files found: %s\n' "$YELLOW" "$RESET" "${CONFLICTS[*]}" >&2
+  if (( ! FORCE )); then
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      printf 'Back up these files and replace them? [y/N] ' >/dev/tty
+      IFS= read -r answer </dev/tty || answer=''
+      [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]] || { echo 'Aborted.'; exit 0; }
+    else
+      die 'Non-interactive install has conflicts. Re-run with --force to back them up and replace them.'
+    fi
+  fi
+fi
+
+STAGE_DIR="$(mktemp -d "$BIN_DIR/.bun-node-stage.XXXXXX")" || die 'Could not create a staging directory.'
+BACKUP_DIR=''
+cleanup() { rm -rf -- "$STAGE_DIR"; }
+trap cleanup EXIT
+
+# One dispatcher handles all four command names. Its configured paths are
+# shell-quoted by printf %q, so spaces and shell metacharacters are safe.
+{
+  printf '#!/usr/bin/env bash\n# bun-node-managed-file\n_BUN=%q\n_SHIM_BIN_DIR=%q\n_DEFAULT_NODE_VERSION=%q\n_DEFAULT_NPM_VERSION=%q\n_DEFAULT_YARN_VERSION=%q\n' \
+    "$BUN_BIN_PATH" "$BIN_DIR" "$SPOOF_NODE_VERSION" "$SPOOF_NPM_VERSION" "$SPOOF_YARN_VERSION"
+  cat <<'SHIM'
+set -Eeuo pipefail
+
+readonly _DEFAULT_NODE_VERSION _DEFAULT_NPM_VERSION _DEFAULT_YARN_VERSION
+readonly _NPM_URL='https://docs.npmjs.com/downloading-and-installing-node-js-and-npm'
+readonly _TOOL="${0##*/}"
+
+_fail() { printf 'bun-node: %s\n' "$*" >&2; exit 1; }
+_debug() {
+  [[ "${BUN_NODE_DEBUG:-}" == 1 ]] || return 0
+  printf '[bun-node] %s' "$_TOOL" >&2
+  printf ' %q' "$@" >&2
+  printf '\n' >&2
+}
+_need_bun() { [[ -x "$_BUN" ]] || _fail "Bun not found at $_BUN"; }
+
+# Return the first matching executable outside bun-node's own bin directory.
+_real_command() {
+  local name=$1 dir candidate
+  local -a dirs=()
+  IFS=: read -r -a dirs <<< "${PATH-}"
+  for dir in "${dirs[@]}"; do
+    [[ -n "$dir" ]] || dir=.
+    [[ "${dir%/}" == "${_SHIM_BIN_DIR%/}" ]] && continue
+    candidate="$dir/$name"
+    [[ -f "$candidate" && -x "$candidate" ]] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+# Pull npm's --prefix/-C out of an argument list and leave all other argv
+# elements intact. Arrays avoid word-splitting bugs for paths and arguments.
+_BN_PREFIX=''
+_BN_ARGS=()
+_parse_prefix_args() {
+  _BN_PREFIX=''
+  _BN_ARGS=()
+  while (($#)); do
+    case "$1" in
+      --prefix|-C)
+        (($# >= 2)) || _fail "$1 requires a directory argument"
+        _BN_PREFIX=$2
+        # npm creates a fresh prefix directory on install; mirror that.
+        mkdir -p -- "$_BN_PREFIX" || _fail "could not create prefix directory: $_BN_PREFIX"
+        [[ -f "$_BN_PREFIX/package.json" ]] || printf '{}' > "$_BN_PREFIX/package.json"
+        shift 2 ;;
+      --prefix=*|-C=*)
+        _BN_PREFIX=${1#*=}
+        mkdir -p -- "$_BN_PREFIX" || _fail "could not create prefix directory: $_BN_PREFIX"
+        [[ -f "$_BN_PREFIX/package.json" ]] || printf '{}' > "$_BN_PREFIX/package.json"
+        shift ;;
+      *) _BN_ARGS+=("$1"); shift ;;
+    esac
+  done
+}
+_run_bun() {
+  local cwd=$1 command=$2; shift 2
+  if [[ -n "$cwd" ]]; then exec "$_BUN" "$command" --cwd "$cwd" "$@"; fi
+  exec "$_BUN" "$command" "$@"
+}
+
+_debug "$@"
+_need_bun
+
+case "$_TOOL" in
+  node)
+    _node_version() {
+      local dir=$PWD file version
+      while :; do
+        for file in .node-version .nvmrc; do
+          if [[ -f "$dir/$file" ]]; then
+            IFS= read -r version < "$dir/$file" || :
+            printf '%s\n' "$version"
+            return
+          fi
+        done
+        [[ "$dir" == / ]] && break
+        dir=$(dirname -- "$dir")
+      done
+      printf '%s\n' "${BUN_NODE_SPOOF_VERSION:-$_DEFAULT_NODE_VERSION}"
+    }
+    case "${1-}" in
+      --version|-v)
+        version=$(_node_version)
+        [[ "$version" == v* ]] || version="v$version"
+        printf '%s\n' "$version" ;;
+      --print|-p)
+        shift
+        exec "$_BUN" -e "console.log(${1-})" ;;
+      -e|--eval)
+        shift
+        exec "$_BUN" -e "$@" ;;
+      *) exec "$_BUN" "$@" ;;
+    esac
     ;;
-  help|-h|--help)
-    echo ""
-    printf "  \${BOLD}bun-node\${RESET} <command>\n\n"
-    printf "  status   show installed shims and versions (default)\n"
-    printf "  help     this message\n"
-    echo ""
+
+  npm)
+    # npm permits --prefix before the command; normalize it to a command option.
+    case "${1-}" in
+      --prefix|-C)
+        (($# >= 2)) || _fail "$1 requires a directory argument"
+        _lead_prefix=$2; shift 2
+        (($#)) || _fail 'expected an npm command after --prefix'
+        set -- "$1" --prefix "$_lead_prefix" "${@:2}" ;;
+      --prefix=*|-C=*)
+        _lead_prefix=${1#*=}; shift
+        (($#)) || _fail 'expected an npm command after --prefix'
+        set -- "$1" --prefix "$_lead_prefix" "${@:2}" ;;
+    esac
+    case "${1-}" in
+      --version|-v) printf '%s\n' "${BUN_NODE_SPOOF_NPM_VERSION:-$_DEFAULT_NPM_VERSION}" ;;
+      install|i)
+        shift; _parse_prefix_args "$@"
+        # `npm install <pkg>` implies `bun add`; bare `npm install` implies install.
+        _command=install
+        for _arg in "${_BN_ARGS[@]}"; do
+          if [[ "$_arg" != -* ]]; then _command=add; break; fi
+        done
+        _run_bun "$_BN_PREFIX" "$_command" "${_BN_ARGS[@]}" ;;
+      ci)
+        shift; _parse_prefix_args "$@"
+        _BN_ARGS+=(--frozen-lockfile)
+        _run_bun "$_BN_PREFIX" install "${_BN_ARGS[@]}" ;;
+      uninstall|remove|rm|un|r)
+        shift; _parse_prefix_args "$@"
+        _run_bun "$_BN_PREFIX" remove "${_BN_ARGS[@]}" ;;
+      ls|list|ll|la)
+        shift; _parse_prefix_args "$@"
+        _run_bun "$_BN_PREFIX" pm ls "${_BN_ARGS[@]}" ;;
+      link|unlink|init|publish|update|up|upgrade|audit|whoami)
+        _command=$1; shift
+        case "$_command" in
+          up|upgrade) _command=update ;;
+          whoami) _parse_prefix_args "$@"; _run_bun "$_BN_PREFIX" pm whoami "${_BN_ARGS[@]}" ;;
+          *) _parse_prefix_args "$@"; _run_bun "$_BN_PREFIX" "$_command" "${_BN_ARGS[@]}" ;;
+        esac
+        ;;
+      pack) shift; _parse_prefix_args "$@"; _run_bun "$_BN_PREFIX" pm pack "${_BN_ARGS[@]}" ;;
+      run|run-script|exec|x|start|test|t)
+        _command=$1; shift; _parse_prefix_args "$@"
+        case "$_command" in
+          run-script) _command=run ;;
+          exec|x) _command=x ;;
+          start) _BN_ARGS=(start "${_BN_ARGS[@]}"); _command=run ;;
+          # npm test runs the package's test script; it is not necessarily `bun test`.
+          test|t) _BN_ARGS=(test "${_BN_ARGS[@]}"); _command=run ;;
+        esac
+        _run_bun "$_BN_PREFIX" "$_command" "${_BN_ARGS[@]}" ;;
+      prefix)
+        shift; _global=0; _cli_prefix=''
+        while (($#)); do
+          case "$1" in
+            -g|--global) _global=1; shift ;;
+            --prefix|-C)
+              (($# >= 2)) || _fail "$1 requires a directory argument"
+              _cli_prefix=$2; shift 2 ;;
+            --prefix=*|-C=*) _cli_prefix=${1#*=}; shift ;;
+            *) shift ;;
+          esac
+        done
+        if ((_global)); then
+          _global_bin=$("$_BUN" pm bin -g 2>/dev/null) || _fail 'could not resolve Bun global bin directory'
+          dirname -- "$_global_bin"
+        else
+          exec "$_BUN" "${_BUN%/*}/bun-node-prefix" "$PWD" "$_cli_prefix"
+        fi
+        ;;
+      node-gyp)
+        printf 'bun-node: native addons (.node files / node-gyp) are not supported by Bun.\n' >&2
+        printf 'bun-node: You will need Node.js for this package.\n' >&2
+        exit 1 ;;
+      deprecate|owner|team|org|hook|fund|token|profile|stars|adduser|login|logout|ping|access|dist-tag|shrinkwrap|doctor)
+        _npm=$(_real_command npm || true)
+        if [[ -n "$_npm" ]]; then
+          printf "bun-node: '%s' is unsupported by Bun; delegating to %s\n" "$1" "$_npm" >&2
+          exec "$_npm" "$@"
+        fi
+        _fail "'npm $1' is unsupported by Bun and no real npm was found. See $_NPM_URL" ;;
+      *) exec "$_BUN" "$@" ;;
+    esac
     ;;
-  *)
-    echo "bun-node: unknown command '\$1'. Run 'bun-node status' or 'bun-node help'." >&2
-    exit 1
+
+  npx)
+    case "${1-}" in
+      --version|-v) printf '%s\n' "${BUN_NODE_SPOOF_NPM_VERSION:-$_DEFAULT_NPM_VERSION}" ;;
+      node-gyp)
+        printf 'bun-node: native addons (.node files / node-gyp) are not supported by Bun.\n' >&2
+        printf 'bun-node: You will need Node.js for this package.\n' >&2
+        exit 1 ;;
+      *)
+        while [[ "${1-}" == -y || "${1-}" == --yes ]]; do shift; done
+        if [[ "${1-}" == --no-install ]]; then
+          shift
+          # Best-effort approximation: do not fetch if Bun can satisfy from cache.
+          exec "$_BUN" x --prefer-offline "$@"
+        fi
+        exec "$_BUN" x "$@" ;;
+    esac
     ;;
+
+  yarn)
+    case "${1-}" in
+      --version|-v) printf '%s\n' "${BUN_NODE_SPOOF_YARN_VERSION:-$_DEFAULT_YARN_VERSION}" ;;
+      '') exec "$_BUN" install ;;
+      add) shift; exec "$_BUN" add "$@" ;;
+      remove|rm) shift; exec "$_BUN" remove "$@" ;;
+      install) shift; exec "$_BUN" install "$@" ;;
+      run) shift; exec "$_BUN" run "$@" ;;
+      start|build|test|dev|lint|format|clean|typecheck|check) exec "$_BUN" run "$@" ;;
+      upgrade|up) shift; exec "$_BUN" update "$@" ;;
+      global)
+        [[ -n "${2-}" ]] || _fail 'expected a subcommand after yarn global'
+        _global_sub=$2; shift 2
+        case "$_global_sub" in
+          add) exec "$_BUN" add --global "$@" ;;
+          remove) exec "$_BUN" remove --global "$@" ;;
+          *) exec "$_BUN" "$_global_sub" "$@" ;;
+        esac ;;
+      dlx|exec) shift; exec "$_BUN" x "$@" ;;
+      init|link|unlink) _command=$1; shift; exec "$_BUN" "$_command" "$@" ;;
+      info) shift; exec "$_BUN" pm "$@" ;;
+      publish|pack|login|logout|owner|team|workspace|workspaces|policies|why|outdated|licenses|audit|import|create)
+        _yarn=$(_real_command yarn || true)
+        if [[ -n "$_yarn" ]]; then
+          printf "bun-node: '%s' is unsupported by Bun; delegating to %s\n" "$1" "$_yarn" >&2
+          exec "$_yarn" "$@"
+        fi
+        _fail "'yarn $1' is unsupported by Bun and no real yarn was found." ;;
+      *) exec "$_BUN" run "$@" ;;
+    esac
+    ;;
+  *) _fail "unknown dispatcher name: $_TOOL" ;;
 esac
 SHIM
-chmod +x "$BIN_DIR/bun-node"
-ok "bun-node status command written"
+} > "$STAGE_DIR/bun-node-shim"
+chmod 755 "$STAGE_DIR/bun-node-shim"
 
-# ── Write: bun-node-uninstall ─────────────────────────────────────────────────
-step "Writing uninstaller"
-cat > "$BIN_DIR/bun-node-uninstall" << UNINSTALL
-#!/usr/bin/env bash
-set -euo pipefail
-BIN_DIR="${SHIM_BIN_DIR}"
-echo "Removing bun-node shims from \$BIN_DIR ..."
-rm -f "\$BIN_DIR/node" "\$BIN_DIR/npm" "\$BIN_DIR/npx" "\$BIN_DIR/yarn" \
-      "\$BIN_DIR/bun-node" "\$BIN_DIR/bun-node-uninstall"
-echo "Done. bun itself is untouched."
+cat > "$STAGE_DIR/bun-node-prefix" <<'PREFIX'
+#!/usr/bin/env bun
+// bun-node-managed-file
+import { Glob } from "bun";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
+const exists = existsSync;
+const cwd = path.resolve(process.argv[2] || process.cwd());
+const cliPrefix = process.argv[3] || "";
+if (cliPrefix) {
+  console.log(path.resolve(cwd, cliPrefix));
+  process.exit(0);
+}
+
+function isWorkspaceMember(root, child, patterns) {
+  if (!exists(path.join(child, "package.json"))) return false;
+  const relative = path.relative(root, child).split(path.sep).join("/");
+  if (!relative || relative === ".." || relative.startsWith("../")) return false;
+  let matched = false;
+  for (let pattern of patterns) {
+    pattern = String(pattern);
+    const excluded = pattern.startsWith("!");
+    if (excluded) pattern = pattern.slice(1);
+    pattern = pattern.replace(/^(?:\.\/)+/, "");
+    pattern = pattern.endsWith("package.json")
+      ? pattern
+      : `${pattern.replace(/\/+$/, "")}/package.json`;
+    try {
+      if (new Glob(pattern).match(`${relative}/package.json`)) matched = !excluded;
+    } catch {
+      // Ignore invalid patterns, matching the helper's forgiving behavior.
+    }
+  }
+  return matched;
+}
+
+let project;
+for (let dir = cwd; ; dir = path.dirname(dir)) {
+  const pkgPath = path.join(dir, "package.json");
+  const hasPackageJson = exists(pkgPath);
+  if (!project && (hasPackageJson || exists(path.join(dir, "node_modules")))) project = dir;
+
+  if (project && hasPackageJson && dir !== project) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+      const workspaces = Array.isArray(pkg.workspaces)
+        ? pkg.workspaces
+        : Array.isArray(pkg.workspaces?.packages) ? pkg.workspaces.packages : null;
+      if (workspaces && isWorkspaceMember(dir, project, workspaces)) {
+        project = dir;
+        break;
+      }
+    } catch {
+      // A malformed parent manifest should not prevent looking farther up.
+    }
+  }
+
+  const parent = path.dirname(dir);
+  if (parent === dir) break;
+}
+console.log(project || cwd);
+PREFIX
+chmod 755 "$STAGE_DIR/bun-node-prefix"
+
+{
+  printf '#!/usr/bin/env bash\n# bun-node-managed-file\n_BIN_DIR=%q\n' "$BIN_DIR"
+  cat <<'STATUS'
+set -Eeuo pipefail
+BIN_DIR="$_BIN_DIR"
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m' DIM=$'\033[2m' GREEN=$'\033[0;32m' RED=$'\033[0;31m' RESET=$'\033[0m'
+else BOLD='' DIM='' GREEN='' RED='' RESET=''; fi
+
+shim_status() {
+  local name=$1
+  if [[ -L "$BIN_DIR/$name" && "$(readlink -- "$BIN_DIR/$name" 2>/dev/null || true)" == bun-node-shim ]]; then
+    printf '%b✓%b' "$GREEN" "$RESET"
+  else printf '%b✗%b' "$RED" "$RESET"; fi
+}
+
+case "${1:-status}" in
+  status)
+    printf '\n%b bun-node%b  node/npm/npx/yarn → bun\n' "$BOLD" "$RESET"
+    printf '──────────────────────────────────────────\n\n'
+    printf '  %bbun%b       %s  v%s\n' "$DIM" "$RESET" "$(type -P bun 2>/dev/null || echo 'not found')" "$(bun --version 2>/dev/null || echo '?')"
+    printf '  %bshim dir%b  %s\n\n' "$DIM" "$RESET" "$BIN_DIR"
+    for name in node npm npx yarn; do
+      printf '  %s  %-5s' "$(shim_status "$name")" "$name"
+      if [[ -L "$BIN_DIR/$name" && "$(readlink -- "$BIN_DIR/$name" 2>/dev/null || true)" == bun-node-shim ]]; then
+        case "$name" in
+          node) version=$("$BIN_DIR/node" --version 2>/dev/null || echo '?') ;;
+          npm) version=$("$BIN_DIR/npm" --version 2>/dev/null || echo '?') ;;
+          yarn) version=$("$BIN_DIR/yarn" --version 2>/dev/null || echo '?') ;;
+          npx) version='bun x' ;;
+        esac
+        printf ' %b→ %s%b\n' "$DIM" "$version" "$RESET"
+      else printf ' %bnot installed%b\n' "$RED" "$RESET"; fi
+    done
+    printf '\n  %bdebug%b     BUN_NODE_DEBUG=1 npm install\n\n' "$DIM" "$RESET" ;;
+  help|-h|--help)
+    printf '\nbun-node <command>\n\n  status   Show installed shims and versions (default)\n  help     Show this message\n\n' ;;
+  *) printf "bun-node: unknown command '%s'. Run 'bun-node help'.\n" "$1" >&2; exit 1 ;;
+esac
+STATUS
+} > "$STAGE_DIR/bun-node"
+chmod 755 "$STAGE_DIR/bun-node"
+
+{
+  printf '#!/usr/bin/env bash\n# bun-node-managed-file\n_BIN_DIR=%q\n' "$BIN_DIR"
+  cat <<'UNINSTALL'
+set -Eeuo pipefail
+BIN_DIR="$_BIN_DIR"
+for name in node npm npx yarn; do
+  if [[ -L "$BIN_DIR/$name" && "$(readlink -- "$BIN_DIR/$name" 2>/dev/null || true)" == bun-node-shim ]]; then
+    rm -- "$BIN_DIR/$name"
+  fi
+done
+for name in bun-node-shim bun-node-prefix bun-node bun-node-uninstall bun-node-update; do
+  file="$BIN_DIR/$name"
+  if [[ -f "$file" ]] && grep -qF 'bun-node-managed-file' "$file" 2>/dev/null; then rm -- "$file"; fi
+done
+printf 'Removed bun-node. Bun itself and unrelated files were left untouched.\n'
 UNINSTALL
-chmod +x "$BIN_DIR/bun-node-uninstall"
+} > "$STAGE_DIR/bun-node-uninstall"
+chmod 755 "$STAGE_DIR/bun-node-uninstall"
 
-# ── Write: bun-node-update ────────────────────────────────────────────────────
-step "Writing updater"
-cat > "$BIN_DIR/bun-node-update" << 'UPDATE'
+cat > "$STAGE_DIR/bun-node-update" <<'UPDATE'
 #!/usr/bin/env bash
-set -euo pipefail
-echo "Updating bun-node..."
-curl -fsSL https://raw.githubusercontent.com/bethropolis/bun-node/main/install.sh | bash
+# bun-node-managed-file
+set -Eeuo pipefail
+url='https://raw.githubusercontent.com/bethropolis/bun-node/main/install.sh'
+tmp=$(mktemp "${TMPDIR:-/tmp}/bun-node-update.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+command -v curl >/dev/null 2>&1 || { echo 'bun-node-update: curl is required.' >&2; exit 1; }
+printf 'Updating bun-node...\n'
+curl -fsSL "$url" -o "$tmp"
+bash "$tmp" "$@"
 UPDATE
-chmod +x "$BIN_DIR/bun-node-update"
-ok "Updater written"
+chmod 755 "$STAGE_DIR/bun-node-update"
 
-# ── Done ─────────────────────────────────────────────────────────────────────
-echo ""
-echo "──────────────────────────────────────────"
-printf "${GREEN}${BOLD}  bun-node installed!${RESET}\n"
-echo "──────────────────────────────────────────"
-echo ""
-printf "  ${DIM}shims${RESET}     node  npm  npx  yarn\n"
-printf "  ${DIM}location${RESET}  $BIN_DIR\n"
-printf "  ${DIM}PATH${RESET}      no changes — bun already owns this dir\n"
-echo ""
-printf "  Verify:\n"
-printf "    ${BOLD}bun-node status${RESET}\n"
-echo ""
-printf "  Debug mode:\n"
-printf "    ${BOLD}BUN_NODE_DEBUG=1 npm install${RESET}\n"
-echo ""
-printf "  To update:    ${BOLD}bun-node-update${RESET}\n"
-printf "  To uninstall: ${BOLD}bun-node-uninstall${RESET}\n"
-echo ""
+# Back up conflicts only after the replacement files are staged successfully.
+if ((${#CONFLICTS[@]})); then
+  BACKUP_DIR="$BIN_DIR/.bun-node-backup-$(date +%Y%m%d-%H%M%S)-$$"
+  mkdir -m 700 -- "$BACKUP_DIR" || die "Could not create backup directory: $BACKUP_DIR"
+  for name in "${CONFLICTS[@]}"; do
+    if [[ -e "$BIN_DIR/$name" || -L "$BIN_DIR/$name" ]]; then
+      mv -- "$BIN_DIR/$name" "$BACKUP_DIR/$name" || die "Could not back up $BIN_DIR/$name"
+    fi
+  done
+  warn "Previous files backed up to $BACKUP_DIR"
+fi
+
+# Replace the shared dispatcher atomically, then relink the command names.
+for name in bun-node-shim bun-node-prefix bun-node bun-node-uninstall bun-node-update; do
+  mv -f -- "$STAGE_DIR/$name" "$BIN_DIR/$name" || die "Could not install $name"
+done
+for name in node npm npx yarn; do
+  ln -sfn -- bun-node-shim "$STAGE_DIR/$name"
+  mv -f -- "$STAGE_DIR/$name" "$BIN_DIR/$name" || die "Could not install shim: $name"
+done
+
+ok 'Shared dispatcher, command shims, and helper utilities installed.'
+if (( ! QUIET )); then
+  printf '\n%b bun-node installed!%b\n' "$GREEN$BOLD" "$RESET"
+  printf '  shims     node  npm  npx  yarn\n  location  %s\n  status    bun-node status\n  debug     BUN_NODE_DEBUG=1 npm install\n  update    bun-node-update\n  uninstall bun-node-uninstall\n' "$BIN_DIR"
+  [[ -z "$BACKUP_DIR" ]] || printf '  backups   %s\n' "$BACKUP_DIR"
+  printf '\n'
+fi
+
